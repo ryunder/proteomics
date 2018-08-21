@@ -1,0 +1,67 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library("DEP")
+library(dplyr)
+```
+
+
+#Introduction  
+This project is based on IP and MS experiments that Johan Panek has performed in the lab. The investigation is looking for proteins that experience different levels of ubiquitylation in pals-22 or cul-6 mutants when compared to wt N2 animals.  
+
+##(2018_08_20)
+A challenge I expect to face is the difficulty annotating the data. Specific issues that are expected: 1) Consistent naming convention - we have Uniprot and WB names, being used and it will be important to make everything consistent. 2) isoforms - the same gene may have multiple isoforms which will be considered as distinct proteins, it will be important to match different isoforms to the correct gene. 3) Highly similar proteins (may also affect isoforms) - some proteins are so similar that cleaved peptide fragments in two proteins (like COL-159 and COL-160) are indistinguishable. To deal with these instances my initial estimate is that I will drop the second protein identity and hope that this will affect few proteins and that we won't be interested in the proteins that this decision does affect. It should be possible to save these extra proteins in a data column so that they are not lost. 
+
+Data from the jy1-3 sample is very different than the all other data and 
+
+##Load data
+```{r}
+file <- "MaxQuant_intensity.csv"
+maxq <- read.csv(file, stringsAsFactors = F)
+dim(maxq)
+head(maxq)
+```
+
+##Organize data
+```{r}
+colnames(maxq)
+colnames(maxq) <- gsub("_TUBE.IP_Troemel_Lab", "", colnames(maxq))
+colnames(maxq)
+```
+
+Use gsub to remove all genes following the first ';' encountered. gsub uses regular expression (regex)(this statement is only partially true, but I won't get into that here). The "." is a wildcard character in regex, and the "*" is a quantifier stating to find the previous character zero or more times. In summary, this expression looks for a character string beginning with ';' followed by ANY character (.) repeated zero to inf times (\*) (note: the \ is an escape character, because in R markdown anything between two asteriks will be italicized), and replaces that string with nothing ("").    
+```{r}
+maxq[,1] <- gsub(";.*","",maxq[,1])
+head(maxq)
+```
+
+Right now it looks as though we have all the proteins with appropriate Uniprot identifiers, a column with all the Uniprot identifiers attributed to that row.
+
+##Make experimental design data frame
+Based on the design form the DEP vignette - make three columns of sample names, sample condition (geneotype/treatment), and the replicate number.
+```{r}
+maxq_labels <- colnames(maxq)[7:21]
+maxq_labels <- gsub("LFQ.intensity.", "", maxq_labels)
+maxq_condition <- substr(maxq_labels, 1, (nchar(maxq_labels)-2))
+maxq_replicate <- rep(1:3,5)
+maxq_ExpDesign <- data.frame("label"=maxq_labels, "condition"=maxq_condition,
+                             replicate=maxq_replicate)
+maxq_ExpDesign
+```
+
+#Data pre-processing
+These steps first check to see if there are duplicated values of either the protein IDs or the gene names. In both instances there are duplicates. The following statement then makes a table of which values are duplicated. Apart from the many proteins without gene names, we have a few duplicates. The `make_unique()` function is a part of the DEP library and generates a unique names for each entry based on the gene name and protein id. it loads this into a new column "name".
+```{r}
+maxq$Protein.IDs %>% duplicated() %>% any()
+maxq$Gene.names %>% duplicated() %>% any()
+
+maxq %>% group_by(Gene.names) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+
+maxq_unique <- make_unique(maxq, "Gene.names", "Protein.IDs", delim = ";")
+maxq_unique$name %>% duplicated() %>% any()
+```
+
