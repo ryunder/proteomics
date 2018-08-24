@@ -40,28 +40,190 @@ head(maxq)
 
 Right now it looks as though we have all the proteins with appropriate Uniprot identifiers, a column with all the Uniprot identifiers attributed to that row.
 
+Next, we know a few things from a visual inspection of the original excel file that we will clean up here. First, there are extra data columns that are not relevant to us, second there are some nonsensical row values, and third one the replicates (jy1 - 3) is clearly an outlier and should be removed from the analysis. We remove the excess columns here, and we will deal with the strange rows further below.
+```{r}
+#remove unnecessary data columns and outlier column
+data <- maxq[,c(1:17,19:21)]
+colnames(data)
+```
+
+
+#Data pre-processing
+These steps first check to see if there are duplicated values of either the protein IDs or the gene names. In both instances there are duplicates. The following statement then makes a table of which values are duplicated. Apart from the many proteins without gene names, we have a few duplicates. The `make_unique()` function is a part of the DEP library and generates a unique names for each entry based on the gene name and protein id. it loads this into a new column "name". We then perform a check to make certain there are no duplicated name values.
+```{r}
+data$Protein.IDs %>% duplicated() %>% any()
+data$Gene.names %>% duplicated() %>% any()
+
+data %>% group_by(Protein.IDs) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+data %>% group_by(Gene.names) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+
+data_unique <- make_unique(data, "Gene.names", "Protein.IDs", delim = ";")
+data_unique$name %>% duplicated() %>% any()
+```
+
+Now to deal with the strange rows.
+```{r}
+data_unique %>% group_by(Protein.IDs) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency))
+```
+We can see that there are two rows without a Protein.ID, 1 with a Protein.ID = 2, and another row with the Protein.ID = 302021. 
+```{r}
+data_unique[(data_unique[,"Protein.IDs"]==""),]
+data_unique[(data_unique[,"Protein.IDs"]==2),]
+data_unique[(data_unique[,"Protein.IDs"]==302021),]
+data_unique[(data_unique[,"Protein.IDs"]=="A3QM90"),]
+```
+Upon inspecting all of these questionable rows, along with a positive control row A3QM90, we can see that the data values are NA in all known suspicious rows. This is good because a future step will be to remove rows that are comprised of NA values.
+
 ##Make experimental design data frame
 Based on the design form the DEP vignette - make three columns of sample names, sample condition (geneotype/treatment), and the replicate number.
 ```{r}
-maxq_labels <- colnames(maxq)[7:21]
+maxq_labels <- colnames(data)[7:20]
 maxq_labels <- gsub("LFQ.intensity.", "", maxq_labels)
 maxq_condition <- substr(maxq_labels, 1, (nchar(maxq_labels)-2))
-maxq_replicate <- rep(1:3,5)
+maxq_replicate <- c(rep(1:3,3),1:2,1:3)
 maxq_ExpDesign <- data.frame("label"=maxq_labels, "condition"=maxq_condition,
-                             replicate=maxq_replicate)
+                             "replicate"=maxq_replicate, stringsAsFactors = F)
+maxq_columns <- grep("LFQ.", colnames(data_unique)) # get column numbers
+
 maxq_ExpDesign
+maxq_columns
 ```
 
-#Data pre-processing
-These steps first check to see if there are duplicated values of either the protein IDs or the gene names. In both instances there are duplicates. The following statement then makes a table of which values are duplicated. Apart from the many proteins without gene names, we have a few duplicates. The `make_unique()` function is a part of the DEP library and generates a unique names for each entry based on the gene name and protein id. it loads this into a new column "name".
+##Generate Summaraized Experiment object
 ```{r}
-maxq$Protein.IDs %>% duplicated() %>% any()
-maxq$Gene.names %>% duplicated() %>% any()
-
-maxq %>% group_by(Gene.names) %>% summarise(frequency = n()) %>%
-  arrange(desc(frequency)) %>% filter(frequency > 1)
-
-maxq_unique <- make_unique(maxq, "Gene.names", "Protein.IDs", delim = ";")
-maxq_unique$name %>% duplicated() %>% any()
+data_se <- make_se(data_unique, maxq_columns, maxq_ExpDesign)
+data_se
 ```
 
+##Visualize data summary
+A bargraph depicting protein identification overlap between samples. We can see that most proteins are identified in all samples, with a large number of proteins only being identified in a single sample. Additionally, we can see a small number of proteins are not identified in any sample.
+```{r}
+plot_frequency(data_se)
+```
+
+##Filter data
+We want to remove proteins with no data for sure. We can adjust the threshold to whatever we choose though, and it may be useful to complete the analysis removing the large chunk of proteins (~450) that are only identified in a single sample.
+```{r}
+#identified in all replicates of at least one condition
+data_filt <- filter_missval(data_se, thr = 0) 
+#identified in at least 2 replicates in at least one condition
+data_filt2 <- filter_missval(data_se, thr = 1) 
+#Total number of proteins per sample
+plot_numbers(data_filt)
+#barplot showing proteins identified in a multiple samples
+plot_coverage(data_filt)
+```
+
+#Normalization
+Normalize by variance stabilizing transformation (vsn)
+```{r}
+data_norm <- normalize_vsn(data_filt)
+plot_normalization(data_filt, data_norm)
+```
+
+##Impute data for missing values
+This is a tricky step which I am not completely clear on. From what I do undestand, we have two main classes of missing data - missing at random (MAR) and missing not at random (MNAR). Examples given are: MAR- "if proteins are quantified in some replicates but not others", MNAR-"proteins are below detection limit is specific samples". Our goal in these next steps is to fill in the NA values with likely values. If values are MAR, then we use data in other replicates to "guess" a likely value. If data is MNAR, then  First step is too look at the missing values in a heatmap.
+```{r}
+plot_missval(data_filt)
+```
+
+The heatmap shows a mix of values missing from all replicates and values missing from individual replicates. It is comforting that the clustering grouped the replicates together. Our next check will be to look and see if missing values are enriched for lower intensity (low signal) proteins.
+```{r}
+plot_detect(data_filt)
+```
+
+The blue line, the missing values, are certainly biased towards low intensity proteins. This is highly suggestive that missing values are not at random, and are low intensity proteins that are below the detection threshold. Based on the DEP vignette, this instructs us which statistical method should be used to impute values. We will use "MinProb" based on the vignette which will randomly select a value from a Gaussian distribution centered around a minimal value. Essentially, because we think that these missing values are generally due to being below detection levels, we can fill in these values with random small values. 
+```{r}
+data_imp <- impute(data_norm, fun = "MinProb")
+plot_imputation(data_norm, data_imp)
+```
+This graph shows us now that we've added many low intensity values to the data table.
+
+#Differential enrichment analysis
+Generating a linear model and performing statistcal analysis using the limma package. The
+```{r}
+#Tests all conditions agaisnt the control condition
+data_diff <- test_diff(data_imp, type = "control", control = "N2")
+#Perform all comparisons
+data_diff_all <- test_diff(data_imp, type = "all")
+
+lfc = 1
+alpha = 0.05
+
+dep <- add_rejections(data_diff, alpha = alpha, lfc = lfc)
+dep_all <- add_rejections(data_diff_all, alpha = alpha, lfc =lfc)
+```
+
+##Visualize results
+```{r}
+plot_pca(dep, x=1, y=2, point_size = 4)
+plot_pca(dep, x=1, y=2, n=1500, point_size = 4)
+```
+
+```{r}
+plot_cor(dep, significant = T, lower = 0, upper = 1, pal = "Reds")
+```
+
+```{r}
+plot_heatmap(dep, type = "centered", kmeans = T, k=6, col_limit = 4, show_row_names=F,
+             indicate = c("condition", "replicate"))
+```
+
+Now just plot using the contrasts
+```{r}
+plot_heatmap(dep, type = "contrast", kmeans = TRUE, 
+             k = 6, col_limit = 10, show_row_names = FALSE)
+```
+
+```{r}
+plot_volcano(dep, contrast = "Jy1_vs_N2", label_size = 2, add_names = T)
+```
+
+```{r}
+plot_volcano(dep, contrast = "Jy1.Cul6_vs_N2", label_size = 2, add_names = T)
+```
+
+```{r}
+plot_volcano(dep, contrast = "Jy1.Jy11_vs_N2", label_size = 2, add_names = T)
+```
+
+```{r}
+plot_volcano(dep, contrast = "Cul6_vs_N2", label_size = 2, add_names = T)
+```
+
+For some reason, there is an error when I attempt to volcano plot  cul6 vs N2, so I am going to try to reverse the order of comparisons, just because that might work. (spoiler: it does)
+```{r}
+data_diff_cul6 <- test_diff(data_imp, type = "manual", test = "N2_vs_Cul6")
+dep_cul6 <- add_rejections(data_diff_cul6, alpha = alpha, lfc = lfc)
+plot_volcano(dep_cul6, contrast = "N2_vs_Cul6",  label_size = 2)
+```
+
+Bar plots of protein(s) of interest
+```{r}
+plot_single(dep, proteins = c("cul-6", "skr-3"))
+```
+
+```{r}
+plot_single(dep, proteins = "cul-6", type = "centered")
+```
+
+```{r}
+plot_cond(dep)
+```
+
+Extract results table
+```{r}
+data_results <- get_results(dep)
+
+#Number of sig proteins
+data_results %>% filter(significant) %>% nrow()
+
+colnames(data_results)
+```
+
+```{r}
+sessionInfo()
+```
