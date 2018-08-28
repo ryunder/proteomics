@@ -1,6 +1,8 @@
 ---
 title: "R Notebook"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 ```{r}
@@ -35,6 +37,9 @@ colnames(maxq)
 Use gsub to remove all genes following the first ';' encountered. gsub uses regular expression (regex)(this statement is only partially true, but I won't get into that here). The "." is a wildcard character in regex, and the "*" is a quantifier stating to find the previous character zero or more times. In summary, this expression looks for a character string beginning with ';' followed by ANY character (.) repeated zero to inf times (\*) (note: the \ is an escape character, because in R markdown anything between two asteriks will be italicized), and replaces that string with nothing ("").    
 ```{r}
 maxq[,1] <- gsub(";.*","",maxq[,1])
+
+#Added 08-27. Many UNIPROT names were suffixed with "-1" or "-2". THese numbers do not seems to be part of the UNIPROT nomenclature. They are removed here because they interfere with annotation further down.  
+maxq[,1] <- gsub("-.*","",maxq[,1])
 head(maxq)
 ```
 
@@ -179,26 +184,27 @@ plot_heatmap(dep, type = "contrast", kmeans = TRUE,
 ```
 
 ```{r}
-plot_volcano(dep, contrast = "Jy1_vs_N2", label_size = 2, add_names = T)
+plot_volcano(dep, contrast = "Jy1_vs_N2", label_size = 4, add_names = T)
 ```
 
 ```{r}
-plot_volcano(dep, contrast = "Jy1.Cul6_vs_N2", label_size = 2, add_names = T)
+plot_volcano(dep, contrast = "Jy1.Cul6_vs_N2", label_size = 3, add_names = T)
 ```
 
 ```{r}
 plot_volcano(dep, contrast = "Jy1.Jy11_vs_N2", label_size = 2, add_names = T)
 ```
 
+This chunk of code does not run due to an unknown bug. Leaving it hear for archival purposes.
 ```{r}
-plot_volcano(dep, contrast = "Cul6_vs_N2", label_size = 2, add_names = T)
+#plot_volcano(dep, contrast = "Cul6_vs_N2", label_size = 2, add_names = T)
 ```
 
 For some reason, there is an error when I attempt to volcano plot  cul6 vs N2, so I am going to try to reverse the order of comparisons, just because that might work. (spoiler: it does)
 ```{r}
 data_diff_cul6 <- test_diff(data_imp, type = "manual", test = "N2_vs_Cul6")
 dep_cul6 <- add_rejections(data_diff_cul6, alpha = alpha, lfc = lfc)
-plot_volcano(dep_cul6, contrast = "N2_vs_Cul6",  label_size = 2)
+plot_volcano(dep_cul6, contrast = "N2_vs_Cul6",  label_size = 4)
 ```
 
 Bar plots of protein(s) of interest
@@ -223,6 +229,51 @@ data_results %>% filter(significant) %>% nrow()
 
 colnames(data_results)
 ```
+
+#Annotation 
+```{r}
+library(celegans.db)
+library(AnnotationDbi)
+
+proteins <- data_results$ID
+
+columns(celegans.db)
+
+protein.annotate <- select(celegans.db, keys = proteins, columns = c("SYMBOL", "WORMBASE", "UNIPROT"),
+                           keytype = "UNIPROT")
+
+head(protein.annotate)
+
+protein.annotate %>% group_by(WORMBASE) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+
+protein.annotate %>% group_by(SYMBOL) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+
+protein.annotate %>% group_by(UNIPROT) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+
+
+```
+
+Next, we clean up all of the duplicates that were generated. We expect there to be duplicate "SYMBOL" and "WORMBASE" identifiers due to isoforms, but we still want to maintain our unique UNIPROT identifiers. The above code shows `select()` returned 1:many mapping, meaning 1 UNIPROT ID turned up numerous "WORMBASE"
+or "SYMBOL" matches. For instance, "P62784" is annotated as the protein product of his-1, his-10, his-14, and several more. 
+
+```{r}
+length(protein.annotate$UNIPROT)
+protein.annotate <- protein.annotate[!duplicated(protein.annotate$UNIPROT),]
+length(protein.annotate$UNIPROT)
+protein.annotate %>% group_by(UNIPROT) %>% summarise(frequency = n()) %>%
+  arrange(desc(frequency)) %>% filter(frequency > 1)
+```
+
+```{r}
+data_results_merged <- merge(data_results, protein.annotate, by.x = "ID", by.y = "UNIPROT")
+colnames(data_results_merged)
+results <- data_results_merged[,c(2,1,25,26,16:19,3:10)]
+results
+```
+
 
 ```{r}
 sessionInfo()
