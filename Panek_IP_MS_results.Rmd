@@ -17,9 +17,10 @@ This project is based on IP and MS experiments that Johan Panek has performed in
 ##(2018_08_20)
 A challenge I expect to face is the difficulty annotating the data. Specific issues that are expected: 1) Consistent naming convention - we have Uniprot and WB names, being used and it will be important to make everything consistent. 2) isoforms - the same gene may have multiple isoforms which will be considered as distinct proteins, it will be important to match different isoforms to the correct gene. 3) Highly similar proteins (may also affect isoforms) - some proteins are so similar that cleaved peptide fragments in two proteins (like COL-159 and COL-160) are indistinguishable. To deal with these instances my initial estimate is that I will drop the second protein identity and hope that this will affect few proteins and that we won't be interested in the proteins that this decision does affect. It should be possible to save these extra proteins in a data column so that they are not lost. 
 
-Data from the jy1-3 sample is very different than the all other data and 
+Data from the jy1-3 sample is very different than the all other data suggesting it is a clear outlier and will be excluded from thsi analysis.
 
 ##Load data
+This can be done in any number of ways. stringsAsFactors is required to be `FALSE` otherwise certain functions will not work later on.
 ```{r}
 file <- "MaxQuant_intensity.csv"
 maxq <- read.csv(file, stringsAsFactors = F)
@@ -28,13 +29,16 @@ head(maxq)
 ```
 
 ##Organize data
+First step is to make the column names a little easier to handle. Use `gsub()` to remove extraneous words in the labels.
 ```{r}
 colnames(maxq)
 colnames(maxq) <- gsub("_TUBE.IP_Troemel_Lab", "", colnames(maxq))
 colnames(maxq)
 ```
 
-Use gsub to remove all genes following the first ';' encountered. gsub uses regular expression (regex)(this statement is only partially true, but I won't get into that here). The "." is a wildcard character in regex, and the "*" is a quantifier stating to find the previous character zero or more times. In summary, this expression looks for a character string beginning with ';' followed by ANY character (.) repeated zero to inf times (\*) (note: the \ is an escape character, because in R markdown anything between two asteriks will be italicized), and replaces that string with nothing ("").    
+One priority is to eliminate all but the first name in the Protein.IDs column. 
+
+Use gsub to remove all identifiers following the first ';' encountered. gsub uses regular expression (regex)(this statement is only partially true, but I won't get into that here). The "." is a wildcard character in regex, and the "*" is a quantifier stating to find the previous character zero or more times. In summary, this expression looks for a character string beginning with ';' followed by ANY character (.) repeated zero to inf times (\*) (note: the \ is an escape character, because in R markdown anything between two asteriks will be italicized), and replaces that string with nothing ("").    
 ```{r}
 maxq[,1] <- gsub(";.*","",maxq[,1])
 
@@ -68,22 +72,24 @@ data_unique <- make_unique(data, "Gene.names", "Protein.IDs", delim = ";")
 data_unique$name %>% duplicated() %>% any()
 ```
 
-Now to deal with the strange rows.
+Now to deal with the strange rows mentioned above. We assume that these are a strange bug related to the MaxQuant program, but it is just an assumption.
 ```{r}
 data_unique %>% group_by(Protein.IDs) %>% summarise(frequency = n()) %>%
   arrange(desc(frequency))
 ```
-We can see that there are two rows without a Protein.ID, 1 with a Protein.ID = 2, and another row with the Protein.ID = 302021. 
+We can see that there are two rows without a Protein.ID, 1 with a Protein.ID = 2, and another row with the Protein.ID = 302021. Use the arrow icons to scroll through in order to see the values associated with the different columns.
 ```{r}
-data_unique[(data_unique[,"Protein.IDs"]==""),]
+data_unique[(data_unique[,"Protein.IDs"]==""),] #unnamed rows
 data_unique[(data_unique[,"Protein.IDs"]==2),]
 data_unique[(data_unique[,"Protein.IDs"]==302021),]
-data_unique[(data_unique[,"Protein.IDs"]=="A3QM90"),]
+data_unique[(data_unique[,"Protein.IDs"]=="A3QM90"),] #control row
 ```
-Upon inspecting all of these questionable rows, along with a positive control row A3QM90, we can see that the data values are NA in all known suspicious rows. This is good because a future step will be to remove rows that are comprised of NA values.
+Upon inspecting all of these questionable rows, along with a positive control row A3QM90, we can see that the data values are NA in all of the known suspicious rows. This is good because a future step will be to remove rows that are comprised of NA values, and thus we do not need to deal with them here.
 
 ##Make experimental design data frame
-Based on the design form the DEP vignette - make three columns of sample names, sample condition (geneotype/treatment), and the replicate number.
+We need to generate a couple of data objects to assign experimental design classifiers to the data. First we will make a data frame of three columns, "label", "condition", and "replicate". These columns *MUST* be named using this convention in this order. label - individual label for each sample. condition - genotype or treatment. replicate - replicate number of sample.
+
+The second object to make is a numeric vector containing the column numbers associated with the data columns. That is: if you look at `data_unique` what are the column numbers of the columns containing the data. These numbers will match the rows of our `maxq_ExpDesign` data frame to their respective data column, so this step is crucial to get correct.
 ```{r}
 maxq_labels <- colnames(data)[7:20]
 maxq_labels <- gsub("LFQ.intensity.", "", maxq_labels)
@@ -98,6 +104,7 @@ maxq_columns
 ```
 
 ##Generate Summaraized Experiment object
+`make_se()` is a function from the DEP library. It will take our data table and match it to the experiment data we just generated. The product is a SummarizedExperiment object.
 ```{r}
 data_se <- make_se(data_unique, maxq_columns, maxq_ExpDesign)
 data_se
@@ -110,27 +117,37 @@ plot_frequency(data_se)
 ```
 
 ##Filter data
-We want to remove proteins with no data for sure. We can adjust the threshold to whatever we choose though, and it may be useful to complete the analysis removing the large chunk of proteins (~450) that are only identified in a single sample.
+We want to remove proteins with no data for sure, and we probably are not interested in proteins that are only seen in a single sample. I will graph two different thresholds just to give an idea of the diferences in the number of proteins that are filtered.
 ```{r}
 #identified in all replicates of at least one condition
 data_filt <- filter_missval(data_se, thr = 0) 
 #identified in at least 2 replicates in at least one condition
 data_filt2 <- filter_missval(data_se, thr = 1) 
+
+par(mfrow = c(1,2))
 #Total number of proteins per sample
 plot_numbers(data_filt)
+plot_numbers(data_filt2)  
 #barplot showing proteins identified in a multiple samples
 plot_coverage(data_filt)
+plot_coverage(data_filt2)
 ```
 
+We will continue the analysis using `data_filt`, that is eliminate proteins that are not found in each sample of at least one condition. It is relatively simple to return to this step and choose a different threshold later.
+
 #Normalization
-Normalize by variance stabilizing transformation (vsn)
+Normalize by variance stabilizing transformation (vsn). This is similar to the `voom()` function that we use in RNA-seq analysis, in that we are taking samples whose variance depends on the mean and applying vsn so that the sampling variance will be approximately constant.
 ```{r}
 data_norm <- normalize_vsn(data_filt)
 plot_normalization(data_filt, data_norm)
 ```
 
+In this particular instance, the transformation does not change much.
+
 ##Impute data for missing values
-This is a tricky step which I am not completely clear on. From what I do undestand, we have two main classes of missing data - missing at random (MAR) and missing not at random (MNAR). Examples given are: MAR- "if proteins are quantified in some replicates but not others", MNAR-"proteins are below detection limit is specific samples". Our goal in these next steps is to fill in the NA values with likely values. If values are MAR, then we use data in other replicates to "guess" a likely value. If data is MNAR, then  First step is too look at the missing values in a heatmap.
+This is a tricky step which I am not completely clear on. From what I do undestand, we have two main classes of missing data - missing at random (MAR) and missing not at random (MNAR). Examples given are: MAR- "if proteins are quantified in some replicates but not others", MNAR-"proteins are below detection limit in specific samples". Our goal in these next steps is to fill in the NA values with likely values. If values are MAR, then we use data in other replicates to "guess" a likely value. If data is MNAR, then  a small value is randomly assigned based on a normal distribution. [See here](https://bioconductor.org/packages/release/bioc/vignettes/DEP/inst/doc/MissingValues.html) for a more detailed look at this step.
+
+The first step is too look at the missing values in a heatmap and try to determine if we are MAR or MNAR.
 ```{r}
 plot_missval(data_filt)
 ```
@@ -162,16 +179,23 @@ dep <- add_rejections(data_diff, alpha = alpha, lfc = lfc)
 dep_all <- add_rejections(data_diff_all, alpha = alpha, lfc =lfc)
 ```
 
-##Visualize results
+##Visualize results  
+Samples are generally clustered as expected across the x axis. There does seem to be a batch effect relating to the "replicate 1" samples. Johan suspects he knows why. 
+
+The graph suggests to us that jy1 mutants are very different than the other samples, except when jy1 is suppressed by jy11. It also suggests that cul-6 mutants are not very distinct from wt animals. These observatiosn confirm and align with previous observations and expectataions.  
 ```{r}
 plot_pca(dep, x=1, y=2, point_size = 4)
 plot_pca(dep, x=1, y=2, n=1500, point_size = 4)
 ```
 
+Another view at clustering/correlation of the data samples. Again shows that jy1 mutants are distinct from others and that cul-6 mutants are very similar to wt animals.
+
 ```{r}
 plot_cor(dep, significant = T, lower = 0, upper = 1, pal = "Reds")
 ```
 
+
+heatmap of all significant proteins
 ```{r}
 plot_heatmap(dep, type = "centered", kmeans = T, k=6, col_limit = 4, show_row_names=F,
              indicate = c("condition", "replicate"))
@@ -182,6 +206,8 @@ Now just plot using the contrasts
 plot_heatmap(dep, type = "contrast", kmeans = TRUE, 
              k = 6, col_limit = 10, show_row_names = FALSE)
 ```
+
+##Volcano plots
 
 ```{r}
 plot_volcano(dep, contrast = "Jy1_vs_N2", label_size = 4, add_names = T)
@@ -207,7 +233,7 @@ dep_cul6 <- add_rejections(data_diff_cul6, alpha = alpha, lfc = lfc)
 plot_volcano(dep_cul6, contrast = "N2_vs_Cul6",  label_size = 4)
 ```
 
-Bar plots of protein(s) of interest
+##Bar plots of protein(s) of interest
 ```{r}
 plot_single(dep, proteins = c("cul-6", "skr-3"))
 ```
@@ -231,6 +257,7 @@ colnames(data_results)
 ```
 
 #Annotation 
+We use the `celegans.db` and `AnnotationDbi` packages to perform these annotations. The `select()` function does the heavy lifting. 
 ```{r}
 library(celegans.db)
 library(AnnotationDbi)
@@ -257,7 +284,7 @@ protein.annotate %>% group_by(UNIPROT) %>% summarise(frequency = n()) %>%
 ```
 
 Next, we clean up all of the duplicates that were generated. We expect there to be duplicate "SYMBOL" and "WORMBASE" identifiers due to isoforms, but we still want to maintain our unique UNIPROT identifiers. The above code shows `select()` returned 1:many mapping, meaning 1 UNIPROT ID turned up numerous "WORMBASE"
-or "SYMBOL" matches. For instance, "P62784" is annotated as the protein product of his-1, his-10, his-14, and several more. 
+or "SYMBOL" matches. For instance, "P62784" is annotated as the protein product of his-1, his-10, his-14, and several more. This means that we now have 71 P62784 samples with different gene names or WB IDs but all have the same data attached.
 
 ```{r}
 length(protein.annotate$UNIPROT)
@@ -267,6 +294,7 @@ protein.annotate %>% group_by(UNIPROT) %>% summarise(frequency = n()) %>%
   arrange(desc(frequency)) %>% filter(frequency > 1)
 ```
 
+
 ```{r}
 data_results_merged <- merge(data_results, protein.annotate, by.x = "ID", by.y = "UNIPROT")
 colnames(data_results_merged)
@@ -274,6 +302,11 @@ results <- data_results_merged[,c(2,1,25,26,16:19,3:10)]
 results
 ```
 
+I spotted some unusual proteins just browing the list. You could sort of SYMBOL or WORMBASE and look at the ~200 proteins without one of these tags to possibly identify more.
+UNUSUAL PROTEINS:
+I3ENK0 - N. parisii protein
+C6Uxxx - E. coli proteins (about 200 of them)
+P14923 and P15924 - Human proteins
 
 ```{r}
 sessionInfo()
